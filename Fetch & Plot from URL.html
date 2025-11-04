@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Shiller ECY / CAPE / Index – Stacked with Explanations</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    :root{--bg:#f8fafc;--fg:#0f172a;--muted:#334155;--card:#ffffff;--border:#e2e8f0;--accent:#2563eb}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+    .wrap{max-width:1100px;margin:28px auto;padding:0 18px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px;box-shadow:0 6px 24px rgba(15,23,42,.06)}
+    h1{font-weight:800;letter-spacing:.2px;font-size:clamp(22px,2.6vw,30px);margin:0 0 6px}
+    h2{font-size:18px;margin:18px 0 6px}
+    p{margin:6px 0 12px;color:var(--muted)}
+    input[type=file]{display:block;margin:10px 0 12px;padding:12px;border-radius:12px;border:1px dashed var(--border);background:#fff;color:var(--fg)}
+    .btn{background:var(--accent);color:#fff;border:0;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:6px 0 14px}
+    .hint{font-size:12px;color:#475569}
+    .chart{height:440px;margin-bottom:14px}
+    code{background:#f1f5f9;border:1px solid var(--border);border-radius:8px;padding:2px 6px}
+    .explain{background:#ffffff;border:1px solid var(--border);border-radius:14px;padding:14px}
+    .ul{margin:6px 0 0 18px;color:#334155}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Shiller Data Charts</h1>
+      <p>Load a local <em>ie_data.xls</em> or fetch directly from the Shiller site. We auto‑detect headers and compute ECY when needed. Everything runs locally in your browser.</p>
+      <div class="row">
+        <input id="file" type="file" accept=".xls,.xlsx,.xlsm" />
+        <button id="parseBtn" class="btn" disabled>Parse & Plot</button>
+        <span id="status" class="hint">Waiting for file…</span>
+      </div>
+      <div class="row">
+        <input id="urlInput" type="text" style="flex:1;min-width:360px;padding:10px;border:1px solid var(--border);border-radius:12px" value="https://img1.wsimg.com/blobby/go/e5e77e0b-59d1-44d9-ab25-4763ac982e53/downloads/4a0629e8-3f7f-4884-817b-81cf106d8f88/ie_data.xls?ver=1759496035247"/>
+        <button id="fetchBtn" class="btn">Fetch & Plot from URL</button>
+        <span class="hint">(Prefers the <em>Data</em> tab if present)</span>
+      </div>
+
+      <!-- Stacked charts -->
+      <div id="chart-ecy" class="chart"></div>
+      <div id="chart-cape" class="chart"></div>
+      <div id="chart-index" class="chart"></div>
+
+      <!-- Explanations -->
+      <div class="explain">
+        <h2>What these charts mean</h2>
+        <p><strong>Excess CAPE Yield (ECY)</strong> ≈ <code>1/CAPE − GS10</code>. It’s a proxy for the equity risk premium: how much the market’s long‑run earnings yield exceeds the 10‑year Treasury yield.</p>
+        <ul class="ul">
+          <li><em>Higher ECY (&gt; 0)</em>: stocks are cheap vs. bonds; historically associated with higher long‑term equity returns.</li>
+          <li><em>Lower/negative ECY</em>: stocks expensive vs. bonds; historically associated with lower long‑term returns.</li>
+        </ul>
+        <p><strong>CAPE (P/E10)</strong> is price divided by average real earnings over the past 10 years. The dotted “Earnings Yield” is <code>100/CAPE</code>, the inverse of CAPE expressed in percent.</p>
+        <ul class="ul">
+          <li>Rising CAPE → more expensive market; falling CAPE → cheaper market.</li>
+        </ul>
+        <p><strong>S&amp;P Composite (Real Price)</strong> shows the long‑run, inflation‑adjusted index level for context across cycles (e.g., 1929, 2000, 2021).</p>
+        <ul class="ul">
+          <li>Use it alongside CAPE/ECY to see when price moves were backed by earnings vs. valuation changes.</li>
+        </ul>
+        <p class="hint">Tip: Use the legend to toggle traces. Drag to zoom. Double‑click to reset view.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---------- helpers ----------
+    const norm = s => String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+    const containsAny = (cell, arr) => { const v = norm(cell); return arr.some(c=> v.includes(norm(c)) || v===norm(c)); };
+
+    function parseMonthYearToken(token){
+      if(token==null || token==='') return null;
+      const n = Number(token);
+      if(Number.isFinite(n)){
+        const y = Math.floor(n); let mm = Math.round((n - y)*100); if(mm===0) mm=1; const m = Math.max(0, Math.min(11, mm-1));
+        return new Date(Date.UTC(y,m,1));
+      }
+      const digits = String(token).replace(/[^0-9]/g,'');
+      if(digits.length>=6){ const y=+digits.slice(0,4); const m=Math.max(0,Math.min(11,+digits.slice(4,6)-1)); return new Date(Date.UTC(y,m,1)); }
+      return null;
+    }
+
+    function findHeaderRow(rows){
+      let best={idx:-1,score:-1};
+      for(let r=0;r<Math.min(60,rows.length);r++){
+        const row=rows[r]||[]; const hasDate=row.some(c=>containsAny(c,['date','year','yearmonth','year.m','yrmo','yr/mo']));
+        if(!hasDate) continue; let s=1;
+        if(row.some(c=>containsAny(c,['p/e10','cape','cyclically adjusted','p e10']))) s++;
+        if(row.some(c=>containsAny(c,['real price','price','s&p comp']))) s++;
+        if(row.some(c=>containsAny(c,['gs10','long interest rate','10 year treasury']))) s++;
+        if(row.some(c=>containsAny(c,['excess cape yield']))) s++;
+        if(s>best.score) best={idx:r,score:s};
+      }
+      return best.idx;
+    }
+
+    function detectColumns(rows){
+      const headerRow=findHeaderRow(rows); if(headerRow<0) throw new Error('Could not locate the header row.');
+      const headers=rows[headerRow];
+      const idx=cands=>{ for(let i=0;i<headers.length;i++){ if(containsAny(headers[i],cands)) return i; } return -1; };
+      const cols={
+        headerRow,
+        date: idx(['date','year','yearmonth','year.m','yrmo','yr/mo']),
+        cape: idx(['p/e10','cape','cyclically adjusted price earnings ratio','p e10']),
+        ecy:  idx(['excess cape yield','ecy']),
+        gs10: idx(['long interest rate gs10','gs10','long interest rate','10 year treasury','10y']),
+        price: idx(['real price','price','s&p comp','composite price','total return price','real total return price'])
+      };
+      return cols;
+    }
+
+    function rowsFromWorkbook(wb){
+      const ws = wb.Sheets['Data'] || wb.Sheets[wb.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null});
+    }
+
+    function readFirstSheet(file){
+      return new Promise((resolve,reject)=>{
+        const reader=new FileReader(); reader.onerror=reject; reader.onload=e=>{ try{ const wb=XLSX.read(new Uint8Array(e.target.result),{type:'array'}); resolve(rowsFromWorkbook(wb)); }catch(err){reject(err)} }; reader.readAsArrayBuffer(file);
+      });
+    }
+
+    async function readFromUrl(url){
+      const resp = await fetch(url, {mode:'cors'});
+      if(!resp.ok) throw new Error('HTTP '+resp.status+' fetching file');
+      const buf = await resp.arrayBuffer();
+      const wb = XLSX.read(new Uint8Array(buf), {type:'array'});
+      return rowsFromWorkbook(wb);
+    }
+
+    function buildSeries(rows){
+      const cols=detectColumns(rows); const start=cols.headerRow+1; const t=[],cape=[],price=[],gs10=[],ecyExplicit=[];
+      for(let r=start;r<rows.length;r++){
+        const row=rows[r]||[]; const d=parseMonthYearToken(row[cols.date]); if(!d) continue; t.push(d);
+        const c=row[cols.cape]; const p=row[cols.price]; const g=cols.gs10>=0?row[cols.gs10]:null; const e=cols.ecy>=0?row[cols.ecy]:null;
+        cape.push(c==null||c===''?null:Number(c)); price.push(p==null||p===''?null:Number(p));
+        gs10.push(g==null||g===''?null:Number(String(g).replace('%',''))/100);
+        ecyExplicit.push(e==null||e===''?null:Number(String(e).replace('%',''))/100);
+      }
+      const ecy=[]; for(let i=0;i<t.length;i++){ if(Number.isFinite(ecyExplicit[i])) ecy.push(ecyExplicit[i]); else if(Number.isFinite(cape[i])&&Number.isFinite(gs10[i])) ecy.push(1/Number(cape[i])-Number(gs10[i])); else ecy.push(null);} 
+      return {t,cape,price,gs10,ecy};
+    }
+
+    function lightLayout(title, ytitle){
+      return { title:{text:title,font:{size:18,color:'#0f172a'}}, paper_bgcolor:'#ffffff', plot_bgcolor:'#ffffff', xaxis:{showgrid:true,gridcolor:'#e5e7eb',zeroline:false,color:'#0f172a'}, yaxis:{title:ytitle,showgrid:true,gridcolor:'#e5e7eb',zeroline:false,color:'#0f172a'}, margin:{l:64,r:24,t:64,b:48}, hovermode:'x unified' };
+    }
+
+    function plotAll(series){
+      const {t,cape,price,ecy,gs10} = series;
+      Plotly.newPlot('chart-ecy', [ {x:t,y:ecy.map(v=>v==null?null:v*100),type:'scatter',mode:'lines',name:'ECY (%)',line:{width:2}}, {x:t,y:gs10.map(v=>v==null?null:v*100),type:'scatter',mode:'lines',name:'GS10 (%)',line:{dash:'dot',width:2}} ], lightLayout('Excess CAPE Yield (ECY)','Percent'), {displaylogo:false,responsive:true});
+      Plotly.newPlot('chart-cape', [ {x:t,y:cape,type:'scatter',mode:'lines',name:'CAPE (P/E10)',line:{width:2}}, {x:t,y:cape.map(v=>v?100/v:null),type:'scatter',mode:'lines',name:'Earnings Yield (100/CAPE, %)',line:{dash:'dot',width:2}} ], lightLayout('CAPE (P/E10) & Earnings Yield','Level / Percent'), {displaylogo:false,responsive:true});
+      Plotly.newPlot('chart-index', [ {x:t,y:price,type:'scatter',mode:'lines',name:'Index / Real Price',line:{width:2}} ], lightLayout('S&P Composite (Price / Real Price)','Index'), {displaylogo:false,responsive:true});
+      document.getElementById('status').textContent='Plotted ✓';
+    }
+
+    // ---------- UI ----------
+    const fileInput=document.getElementById('file');
+    const parseBtn=document.getElementById('parseBtn');
+    fileInput.addEventListener('change', ()=>{
+      parseBtn.disabled=!(fileInput.files&&fileInput.files.length);
+      document.getElementById('status').textContent=fileInput.files&&fileInput.files.length?'File ready. Click Parse & Plot.':'Waiting for file…';
+    });
+    parseBtn.addEventListener('click', async ()=>{
+      const f=fileInput.files&&fileInput.files[0]; if(!f) return; parseBtn.disabled=true; document.getElementById('status').textContent='Parsing…';
+      try{ const rows=await readFirstSheet(f); const series=buildSeries(rows); plotAll(series);}catch(err){ console.error(err); document.getElementById('status').textContent='Failed: '+(err?.message||err);} finally{ parseBtn.disabled=false; }
+    });
+    document.getElementById('fetchBtn').addEventListener('click', async ()=>{
+      const url=document.getElementById('urlInput').value.trim(); if(!url) return; const btn=document.getElementById('fetchBtn'); btn.disabled=true; document.getElementById('status').textContent='Fetching…';
+      try{ const rows=await readFromUrl(url); const series=buildSeries(rows); plotAll(series); document.getElementById('status').textContent='Plotted from URL ✓'; }catch(err){ console.error(err); document.getElementById('status').textContent='Fetch failed: '+(err?.message||err)+' — If blocked by CORS, use the file‑picker.'; } finally{ btn.disabled=false; }
+    });
+  </script>
+</body>
+</html>
